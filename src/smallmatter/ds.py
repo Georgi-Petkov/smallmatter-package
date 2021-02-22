@@ -1,11 +1,11 @@
 """Core data-science utilities."""
 import csv
 import math
-import os
 import warnings
 from io import BytesIO
+from os import PathLike
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import matplotlib
 import numpy as np
@@ -13,34 +13,11 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from PIL import Image, ImageChops
 
-from .pathlib import pathify
+from .pathlib import Path2, pathify
 
 # Silence warning due to pandas using deprecated matplotlib API.
 # See: https://github.com/pandas-dev/pandas/pull/32444
 warnings.filterwarnings("ignore", category=matplotlib.cbook.mplDeprecation)
-
-DD_T = Dict[str, Any]
-
-
-class PyExec(object):
-    """Helper class to execute valid Python codes and get all the newly created symbols.
-
-    Typical use-case: to implement a data dictionary that can mix-in Python code to construct certain variables.
-    """
-
-    @staticmethod
-    def from_file(path: Union[str, Path, os.PathLike], valid_symbols: Iterable[str] = []) -> DD_T:
-        """Execute the Python file and export the symbols as a dictionary."""
-        with pathify(path).open("r") as f:
-            return PyExec.from_str(f.read(), valid_symbols)
-
-    @staticmethod
-    def from_str(s, valid_symbols: Iterable[str] = []) -> DD_T:
-        """Execute the Python codes and export the symbols as a dictionary."""
-        dd_raw: DD_T = {}
-        exec(s, dd_raw)
-        dd = {k: dd_raw[k] for k in dd_raw}
-        return dd
 
 
 class DFBuilder(object):
@@ -66,6 +43,60 @@ class DFBuilder(object):
     def df(self):
         """Return the dataframe representation of this instance."""
         return pd.DataFrame.from_dict({i: row for i, row in enumerate(self.rows)}, orient="index", columns=self.columns)
+
+
+def read_protected_excel(fname: Union[str, Path, PathLike], pwd: str, **kwargs) -> pd.DataFrame:
+    """Load a protected Excel file into a pandas.read_excel(..., engine='openpyxl', ...)."""
+    import msoffcrypto  # Inner import to avoid imposing dependency to non-users.
+
+    decrypted = BytesIO()
+    p = pathify(fname)
+    with p.open("rb") as f:
+        file = msoffcrypto.OfficeFile(f)
+        file.load_key(password=pwd)
+        file.decrypt(decrypted)
+
+    if ("engine" in kwargs) and (kwargs["engine"] != "openpyxl"):
+        warnings.warn("openpyxl engine is recommended.")
+
+    kwargs["engine"] = "openpyxl"
+    return pd.read_excel(decrypted, **kwargs)
+
+
+def mask_df(df: pd.DataFrame, cols: Sequence[str] = []) -> pd.DataFrame:
+    """Mask sensitive columns as "xxx" for display purpose (note: always returns a copy).
+
+    Example:
+
+    >>> import pandas as pd
+    >>> from smallmatter.ds import mask_df
+    >>> df = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6], 'c': [7, 8, 9]})
+    >>> print(mask_df(df, ['a', 'c']))
+        a  b    c
+    0  xxx  4  xxx
+    1  xxx  5  xxx
+    2  xxx  6  xxx
+
+    >>> print(mask_df(df, ['a', 'd']))
+    ...
+    ValueError: Columns not found in df: {'d'}
+
+    Args:
+        df (pd.DataFrame): input dataframe.
+        cols (Iterable[str], optional): List of column names to mask. Defaults to [].
+
+    Returns:
+        pd.DataFrame: a copy of input dataframe with select columns masked.
+    """
+    # Do not let df.loc[] silently ignores cols not in df.columns
+    invalid_cols = set(cols) - set(df.columns)
+    if len(invalid_cols) > 0:
+        raise ValueError(f"Columns not found in df: {invalid_cols}")
+
+    df = df.copy()
+    fillers = "xxx" if len(cols) == 1 else ["xxx"] * len(cols)
+    df.loc[:, cols] = fillers  # This works even when cols == fillers == []
+    return df
 
 
 def json_np_converter(o: Union[np.int64, np.float64]) -> Union[int, float]:
